@@ -262,6 +262,10 @@ impl MemorySet {
             false
         }
     }
+    /// get page table
+    pub fn get_page_table(&mut self) -> &mut PageTable {
+        &mut self.page_table
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {

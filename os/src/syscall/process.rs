@@ -1,8 +1,11 @@
 //! Process management syscalls
 use crate::{
+
     config::{MAX_SYSCALL_NUM, PAGE_SIZE}, 
     mm::{translated_byte_buffer, MapPermission, VirtAddr},
+
     task::*,
+
     timer::{get_time_ms, get_time_us},
 };
 
@@ -47,12 +50,10 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         sec: us / 1_000_000,
         usec: us % 1_000_000,
     };
-    //* 奇妙的跳过不允许直接转换的操作 */
-    //? 从ref只能转换为自己类型的const裸指针 
     let src = &time_val as *const TimeVal;
-    //? const裸指针可以转换为任何类型
+    
     let mut src = src as usize;
-    //* 奇妙的跳过不允许直接转换的操作 */
+    
     let dst_vec = translated_byte_buffer(current_user_token(), _ts as *const u8, core::mem::size_of::<TimeVal>());
     for dst in dst_vec {
         unsafe {
@@ -70,7 +71,6 @@ pub fn sys_record_syscall(syscall_id: usize) -> isize {
     0
 }
 
-
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
@@ -80,14 +80,13 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
         syscall_times: get_current_task_syscall_times(),
         time: get_time_ms() - get_current_task_first_start_time(),
     };
-    //* 奇妙的跳过不允许直接转换的操作 */
-    //? 从ref只能转换为自己类型的const裸指针 
+   
     let src = &task_info as *const TaskInfo;
-    //? const裸指针可以转换为任何类型
+   
     let mut src = src as usize;
-    //* 奇妙的跳过不允许直接转换的操作 */
+    
     let dst_vec = translated_byte_buffer(current_user_token(), _ti as *const u8, core::mem::size_of::<TaskInfo>());
-    for dst in dst_vec {    
+    for dst in dst_vec {
         unsafe {
             core::ptr::copy_nonoverlapping(src as *mut u8, dst.as_mut_ptr(), dst.len());
             src += dst.len();
@@ -96,36 +95,38 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
     0
 }
 
-// YOUR JOB: Implement mmap.
+
+/// Records the number of system calls for the current task
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-   
     if _start % PAGE_SIZE != 0 ||
-        _port & !0x07 == 0 ||
-        _port & 0x07 == 0 {
+        _port & !0x7 != 0 ||
+        _port & 0x7 == 0 {
         return -1;
     }
-   
-    let permission = MapPermission::from_bits_truncate((_port<<1) as u8)|MapPermission::U;
-    
+    // Using from_bits_truncate because our flags contain unknown bits, so from_bits cannot be used
+    let permission = MapPermission::from_bits_truncate((_port << 1) as u8) | MapPermission::U;
+    // Creates a new memory region
+    // Rounds down and up
     let start_vpn = VirtAddr::from(_start).floor();
     let end_vpn = VirtAddr::from(_start + _len).ceil();
-    let vpn_range = VPNRange::new(start_vpn, end_vpn);
-
-
-    if let Some(pte) == get_current_task_pte(end_vpn) {
-        if pte.is_some() {
-            return -1;
-        }
-    }
-
-    0
+    // Calls a function from the task module
+    //* [start, start + len) contains already mapped pages */
+    create_new_map_area(start_vpn, end_vpn, permission)
 }
 
 // YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+    if _start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    // Creates a new memory region
+    // Rounds down and up
+    let start_vpn = VirtAddr::from(_start).floor();
+    let end_vpn = VirtAddr::from(_start + _len).ceil();
+    //* [start, start + len) contains unmapped pages */
+    remove_map_area(start_vpn, end_vpn)
 }
+
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {
     trace!("kernel: sys_sbrk");

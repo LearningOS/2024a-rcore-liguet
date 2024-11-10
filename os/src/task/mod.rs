@@ -14,10 +14,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+/// The application's entry function, which is marked with the `#[app_main]` attribute
 use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
-use crate::mm::{VirtPageNum,PageTableEntry};
+/// Memory management units and other utilities
+use crate::mm::{MapPermission, VPNRange, VirtPageNum};
 use crate::sync::UPSafeCell;
+/// Get the time for current task
 use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -82,6 +85,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+
         next_task.task_first_start_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
@@ -144,6 +148,7 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+
             if inner.tasks[next].task_first_start_time == 0 {
                 inner.tasks[next].task_first_start_time = get_time_ms();
             }
@@ -161,38 +166,75 @@ impl TaskManager {
         }
     }
 
-    /// Retrieves the current task status
-    fn get_current_task_status(&self) -> TaskStatus {
+     ///
+     fn get_current_task_status(&self) -> TaskStatus {
         let inner = self.inner.exclusive_access();
         inner.tasks[inner.current_task].task_status
     }
 
-    /// Records the number of system calls for the current task
+    /// 
     fn record_current_task_syscall_times(&self, syscall_id: usize) {
         let mut inner = self.inner.exclusive_access();
-        // Here, because it is a basic type, it is directly copied
+
         let current = inner.current_task;
-        // Since it is modified here, a mutable reference is used
-        // At the same time, if there is a mutable reference, no other references are allowed, including immutable references
+
         inner.tasks[current].syscall_times[syscall_id] += 1;
     }
 
-    /// Retrieves the number of system calls for the current task
+    /// 
     fn get_current_task_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
         let inner = self.inner.exclusive_access();
         inner.tasks[inner.current_task].syscall_times
     }
 
-    /// Retrieves the start time of the current task
+    /// 
     fn get_current_task_first_start_time(&self) -> usize {
         let inner = self.inner.exclusive_access();
         inner.tasks[inner.current_task].task_first_start_time
     }
 
-
-    fn get_current_task_pte(&self,vpn:VirtPageNum) -> Option<PageTableEntry> {
+    /// 
+    fn check_alloc_map_area(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> bool {
         let inner = self.inner.exclusive_access();
-        inner.tasks[inner.current_task].memory_set.translate(vpn)
+        let current = inner.current_task;
+        let memory_set = &inner.tasks[current].memory_set;
+        let vpn_range = VPNRange::new(start_vpn, end_vpn);
+        for vpn in vpn_range {
+            if let Some(pte) = memory_set.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// 
+    fn create_new_map_area(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum, permission:MapPermission) -> isize {
+        if !self.check_alloc_map_area(start_vpn, end_vpn) {
+            return -1;
+        }
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.insert_framed_area(start_vpn.into(), end_vpn.into(), permission);
+        0
+    }
+
+    /// 
+    fn remove_map_area(&self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let page_table = inner.tasks[current].memory_set.get_page_table();
+        let vpn_range = VPNRange::new(start_vpn, end_vpn);
+        for vpn in vpn_range {
+            if let Some(pte) = page_table.translate(vpn) {
+                if !pte.is_valid() {
+                   return -1;
+                }
+                page_table.unmap(vpn);
+            }
+        }
+        0
     }
 
 }
@@ -218,30 +260,35 @@ fn mark_current_exited() {
     TASK_MANAGER.mark_current_exited();
 }
 
-
+/// 
 pub fn get_current_task_status() -> TaskStatus {
     TASK_MANAGER.get_current_task_status()
 }
 
-
+/// 
 pub fn record_current_task_syscall_times(syscall_id: usize) {
     TASK_MANAGER.record_current_task_syscall_times(syscall_id);
 }
 
-
+/// 
 pub fn get_current_task_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
     TASK_MANAGER.get_current_task_syscall_times()
 }
 
-
+/// 
 pub fn get_current_task_first_start_time() -> usize {
     TASK_MANAGER.get_current_task_first_start_time()
 }
 
-pub fn get_current_task_pte(vpn:VirtPageNum) -> Option<PageTableEntry> {
-    TASK_MANAGER.get_current_task_pte(vpn)
+/// 
+pub fn create_new_map_area(start_vpn: VirtPageNum, end_vpn: VirtPageNum, permission:MapPermission) -> isize {
+    TASK_MANAGER.create_new_map_area(start_vpn, end_vpn, permission)
 }
 
+/// 
+pub fn remove_map_area(start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize {
+    TASK_MANAGER.remove_map_area(start_vpn, end_vpn)
+}
 /// Suspend the current 'Running' task and run the next task in task list.
 pub fn suspend_current_and_run_next() {
     mark_current_suspended();
