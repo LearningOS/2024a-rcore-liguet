@@ -2,13 +2,13 @@
 use alloc::sync::Arc;
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
+    config::{MAX_SYSCALL_NUM, PAGE_SIZE},
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_refmut, translated_str, MapPermission, VirtAddr},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, TaskStatus,
-    },
+    }, timer::{get_time_us,get_time_ms},
 };
 
 #[repr(C)]
@@ -122,7 +122,28 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let us = get_time_us();
+    let time_val = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let src = &time_val as *const TimeVal;
+    let mut src = src as usize;
+    let dst_vec = translated_byte_buffer(current_user_token(), _ts as *const u8, core::mem::size_of::<TimeVal>());
+    for dst in dst_vec {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src as *mut u8, dst.as_mut_ptr(), dst.len());
+            src += dst.len();
+        }
+    }
+    0
+}
+
+
+pub fn sys_record_syscall(syscall_id: usize) -> isize {
+    let current_task = current_task().unwrap();
+    current_task.record_syscall(syscall_id);
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
@@ -133,25 +154,50 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
         "kernel:pid[{}] sys_task_info NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let current_task = current_task().unwrap();
+    let task_info = TaskInfo {
+        status: current_task.get_status(),
+        syscall_times: current_task.get_syscall_times(),
+        time: get_time_ms() - current_task.get_first_scheduled_time(),
+    };
+   
+    let src = &task_info as *const TaskInfo;
+
+    let mut src = src as usize;
+
+    let dst_vec = translated_byte_buffer(current_user_token(), _ti as *const u8, core::mem::size_of::<TaskInfo>());
+    for dst in dst_vec {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src as *mut u8, dst.as_mut_ptr(), dst.len());
+            src += dst.len();
+        }
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    if _start % PAGE_SIZE != 0 ||
+        _port & !0x7 != 0 ||
+        _port & 0x7 == 0 {
+        return -1;
+    }
+    let permission = MapPermission::from_bits_truncate((_port<<1) as u8)|MapPermission::U;
+    let start_vpn = VirtAddr::from(_start).floor();
+    let end_vpn = VirtAddr::from(_start + _len).ceil();
+    let current_task = current_task().unwrap();
+    current_task.create_new_map_area(start_vpn, end_vpn, permission)
 }
 
 /// YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    if _start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    let start_vpn = VirtAddr::from(_start).floor();
+    let end_vpn = VirtAddr::from(_start + _len).ceil();
+    let current_task = current_task().unwrap();
+    current_task.remove_map_area(start_vpn, end_vpn)
 }
 
 /// change data segment size
@@ -171,7 +217,23 @@ pub fn sys_spawn(_path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let current_task = current_task().unwrap();
+        let new_task = current_task.spawn(&data);
+        let new_pid = new_task.pid.0;
+        // modify trap context of new_task, because it returns immediately after switching
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+        trap_cx.x[10] = 0;
+        // add new task to scheduler
+        add_task(new_task);
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
@@ -180,5 +242,10 @@ pub fn sys_set_priority(_prio: isize) -> isize {
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    if _prio < 2 {
+        return -1;
+    }
+    let current_task = current_task().unwrap();
+    current_task.set_priority(_prio);
+    _prio
 }
