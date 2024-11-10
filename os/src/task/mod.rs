@@ -14,8 +14,11 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{VirtPageNum,PageTableEntry};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -79,6 +82,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.task_first_start_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -140,6 +144,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if inner.tasks[next].task_first_start_time == 0 {
+                inner.tasks[next].task_first_start_time = get_time_ms();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -153,6 +160,41 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Retrieves the current task status
+    fn get_current_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].task_status
+    }
+
+    /// Records the number of system calls for the current task
+    fn record_current_task_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        // Here, because it is a basic type, it is directly copied
+        let current = inner.current_task;
+        // Since it is modified here, a mutable reference is used
+        // At the same time, if there is a mutable reference, no other references are allowed, including immutable references
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    /// Retrieves the number of system calls for the current task
+    fn get_current_task_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].syscall_times
+    }
+
+    /// Retrieves the start time of the current task
+    fn get_current_task_first_start_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].task_first_start_time
+    }
+
+
+    fn get_current_task_pte(&self,vpn:VirtPageNum) -> Option<PageTableEntry> {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].memory_set.translate(vpn)
+    }
+
 }
 
 /// Run the first task in task list.
@@ -174,6 +216,30 @@ fn mark_current_suspended() {
 /// Change the status of current `Running` task into `Exited`.
 fn mark_current_exited() {
     TASK_MANAGER.mark_current_exited();
+}
+
+
+pub fn get_current_task_status() -> TaskStatus {
+    TASK_MANAGER.get_current_task_status()
+}
+
+
+pub fn record_current_task_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.record_current_task_syscall_times(syscall_id);
+}
+
+
+pub fn get_current_task_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    TASK_MANAGER.get_current_task_syscall_times()
+}
+
+
+pub fn get_current_task_first_start_time() -> usize {
+    TASK_MANAGER.get_current_task_first_start_time()
+}
+
+pub fn get_current_task_pte(vpn:VirtPageNum) -> Option<PageTableEntry> {
+    TASK_MANAGER.get_current_task_pte(vpn)
 }
 
 /// Suspend the current 'Running' task and run the next task in task list.
