@@ -226,6 +226,7 @@ impl TaskControlBlock {
         // ---- release parent PCB
     }
 
+    /// transfer a running task to a ready task
     pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
@@ -311,9 +312,8 @@ impl TaskControlBlock {
             None
         }
     }
-}
 
-/// Retrieves the current task's status
+    /// Retrieves the current task's status
 pub fn get_status(&self) -> TaskStatus {
     self.inner_exclusive_access().get_status()
 }
@@ -401,6 +401,7 @@ pub fn get_stride(&self) -> usize {
     self.inner_exclusive_access().stride
 }
 
+}
 
 #[derive(Copy, Clone, PartialEq)]
 /// task status: UnInit, Ready, Running, Exited
